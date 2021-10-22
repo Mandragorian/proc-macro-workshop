@@ -9,6 +9,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let mut builder_inners = quote!();
     let mut builder_constructor_inners = quote!();
     let mut builder_methods = quote!();
+    let mut builder_checks = quote!();
+    let mut target_construction = quote!();
 
     let ident = ast.ident;
     let builder_ident = format_ident!("{}Builder", ident);
@@ -29,6 +31,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
                         self
                     }
                 });
+                builder_checks.extend(quote! {
+                    if self.#ident.is_none() {
+                        return Err("no fields can be None");
+                    }
+                });
+                target_construction.extend(quote! {
+                    #ident: self.#ident.unwrap(),
+                });
             }
         }
         _=> unimplemented!(),
@@ -41,6 +51,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         impl #builder_ident {
             #builder_methods
+
+            pub fn build(self) -> Result<#ident, &'static str> {
+                #builder_checks
+
+                Ok(Command {
+                    #target_construction
+                })
+            }
         }
 
         impl #ident {
