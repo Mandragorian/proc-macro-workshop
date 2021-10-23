@@ -43,7 +43,12 @@ fn get_option_arg_if_optional(
     }
 }
 
-fn determine_if_field_is_optional(ty: &syn::Type) -> (bool, Option<&syn::Type>) {
+enum FieldBuilderType<'a> {
+    Simple,
+    Optional(&'a syn::Type),
+}
+
+fn determine_field_type(ty: &syn::Type) -> FieldBuilderType {
     if let syn::Type::Path(tpath) = ty {
         let mut iter = tpath.path.segments.iter();
         let must_be_option = iter.next();
@@ -51,7 +56,11 @@ fn determine_if_field_is_optional(ty: &syn::Type) -> (bool, Option<&syn::Type>) 
 
         let (start_with_option, argument) = get_option_arg_if_optional(must_be_option);
 
-        (start_with_option && must_be_none.is_none(), argument)
+        if start_with_option && must_be_none.is_none() {
+            FieldBuilderType::Optional(argument.unwrap())
+        } else {
+            FieldBuilderType::Simple
+        }
     } else {
         panic!("type wasn't path");
     }
@@ -62,13 +71,14 @@ fn handle_field(
     builder: &mut BuilderBuilder,
 ) {
     let ty = &field.ty;
-    let (is_optional, inner) = determine_if_field_is_optional(ty);
+    let field_builder_type = determine_field_type(ty);
 
     let ident = field.ident.as_ref().unwrap();
-    if is_optional {
-        builder.add_optional(ident, inner.unwrap());
-    } else {
-        builder.add_non_optional(ident, ty);
+    match field_builder_type {
+        FieldBuilderType::Optional(inner) =>
+            builder.add_optional(ident, inner),
+        FieldBuilderType::Simple =>
+            builder.add_simple(ident, ty),
     }
 }
 
@@ -99,7 +109,7 @@ impl BuilderBuilder {
         }
     }
 
-    fn add_non_optional(&mut self, ident: &syn::Ident, ty: &syn::Type) {
+    fn add_simple(&mut self, ident: &syn::Ident, ty: &syn::Type) {
         self.builder_inners.extend(quote! { #ident: Option<#ty>, });
 
         self.builder_methods.extend(quote! {
