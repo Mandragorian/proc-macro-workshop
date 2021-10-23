@@ -1,5 +1,5 @@
 use proc_macro::TokenStream;
-use proc_macro2::TokenTree as TokenTree2;
+use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn;
 
@@ -59,55 +59,124 @@ fn determine_if_field_is_optional(ty: &syn::Type) -> (bool, Option<&syn::Type>) 
 
 fn handle_field(
     field: &syn::Field,
-    builder_inners: &mut impl Extend<TokenTree2>,
-    builder_constructor_inners: &mut impl Extend<TokenTree2>,
-    builder_methods: &mut impl Extend<TokenTree2>,
-    builder_checks: &mut impl Extend<TokenTree2>,
-    target_construction: &mut impl Extend<TokenTree2>,
+    builder: &mut BuilderBuilder,
 ) {
     let ty = &field.ty;
     let (is_optional, inner) = determine_if_field_is_optional(ty);
 
     let ident = field.ident.as_ref().unwrap();
     if is_optional {
-        builder_inners.extend(quote! { #ident: #ty, });
+        builder.add_optional(ident, inner.unwrap());
     } else {
-        builder_inners.extend(quote! { #ident: Option<#ty>, });
+        builder.add_non_optional(ident, ty);
     }
-    builder_constructor_inners.extend(quote! { #ident: None, });
+}
 
-    if is_optional {
-        builder_methods.extend(quote! {
-            pub fn #ident(&mut self, #ident: #inner) -> &mut Self {
-                self.#ident = Some(#ident);
-                self
-            }
-        });
-    } else {
-        builder_methods.extend(quote! {
+struct BuilderBuilder {
+    builder_inners: TokenStream2,
+    builder_constructor_inners: TokenStream2,
+    builder_methods: TokenStream2,
+    builder_checks: TokenStream2,
+    target_construction: TokenStream2,
+    ident: syn::Ident,
+}
+
+impl BuilderBuilder {
+    fn new(ident: syn::Ident) -> Self {
+        let builder_inners = quote!();
+        let builder_constructor_inners = quote!();
+        let builder_methods = quote!();
+        let builder_checks = quote!();
+        let target_construction = quote!();
+
+        BuilderBuilder {
+            builder_inners,
+            builder_constructor_inners,
+            builder_methods,
+            builder_checks,
+            target_construction,
+            ident,
+        }
+    }
+
+    fn add_non_optional(&mut self, ident: &syn::Ident, ty: &syn::Type) {
+        self.builder_inners.extend(quote! { #ident: Option<#ty>, });
+
+        self.builder_methods.extend(quote! {
             pub fn #ident(&mut self, #ident: #ty) -> &mut Self {
                 self.#ident = Some(#ident);
                 self
             }
         });
-    }
 
-    if !is_optional {
-        builder_checks.extend(quote! {
+        self.builder_checks.extend(quote! {
             if self.#ident.is_none() {
                 return Err("no fields can be None");
             }
         });
-    }
 
-    if !is_optional {
-        target_construction.extend(quote! {
+        self.target_construction.extend(quote! {
             #ident: self.#ident.clone().unwrap(),
         });
-    } else {
-        target_construction.extend(quote! {
+
+        self.add_constructor_inner(ident);
+    }
+
+    fn add_optional(&mut self, ident: &syn::Ident, ty: &syn::Type) {
+        self.builder_inners.extend(quote! { #ident: Option<#ty>, });
+
+        self.builder_methods.extend(quote! {
+            pub fn #ident(&mut self, #ident: #ty) -> &mut Self {
+                self.#ident = Some(#ident);
+                self
+            }
+        });
+
+        self.target_construction.extend(quote! {
             #ident: self.#ident.clone(),
         });
+
+        self.add_constructor_inner(ident);
+    }
+
+    fn add_constructor_inner(&mut self, ident: &syn::Ident) {
+        self.builder_constructor_inners.extend(quote! { #ident: None, });
+    }
+
+    fn build(&self) -> TokenStream2 {
+        let builder_inners = &self.builder_inners;
+        let builder_constructor_inners = &self.builder_constructor_inners;
+        let builder_methods = &self.builder_methods;
+        let builder_checks = &self.builder_checks;
+        let target_construction = &self.target_construction;
+        let ident = &self.ident;
+        let builder_ident = format_ident!("{}Builder", ident);
+
+        quote! {
+            pub struct #builder_ident {
+                #builder_inners
+            }
+
+            impl #builder_ident {
+                #builder_methods
+
+                pub fn build(&mut self) -> Result<#ident, &'static str> {
+                    #builder_checks
+
+                    Ok(Command {
+                        #target_construction
+                    })
+                }
+            }
+
+            impl #ident {
+                pub fn builder() -> #builder_ident {
+                    #builder_ident {
+                        #builder_constructor_inners
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -115,14 +184,9 @@ fn handle_field(
 pub fn derive(input: TokenStream) -> TokenStream {
     let ast: syn::DeriveInput = syn::parse(input).unwrap();
 
-    let mut builder_inners = quote!();
-    let mut builder_constructor_inners = quote!();
-    let mut builder_methods = quote!();
-    let mut builder_checks = quote!();
-    let mut target_construction = quote!();
-
     let ident = ast.ident;
-    let builder_ident = format_ident!("{}Builder", ident);
+    let mut builder = BuilderBuilder::new(ident);
+
     let data_struct = get_data_struct_from_ast_data(ast.data);
 
     match data_struct.fields {
@@ -130,42 +194,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
             for field in fields.named.iter() {
                 handle_field(
                     field,
-                    &mut builder_inners,
-                    &mut builder_constructor_inners,
-                    &mut builder_methods,
-                    &mut builder_checks,
-                    &mut target_construction,
+                    &mut builder,
                 );
             }
         }
         _ => unimplemented!(),
     };
 
-    let expanded = quote! {
-        pub struct #builder_ident {
-            #builder_inners
-        }
-
-        impl #builder_ident {
-            #builder_methods
-
-            pub fn build(&mut self) -> Result<#ident, &'static str> {
-                #builder_checks
-
-                Ok(Command {
-                    #target_construction
-                })
-            }
-        }
-
-        impl #ident {
-            pub fn builder() -> #builder_ident {
-                #builder_ident {
-                    #builder_constructor_inners
-                }
-            }
-        }
-    };
+    let expanded = builder.build();
 
     TokenStream::from(expanded)
 }
