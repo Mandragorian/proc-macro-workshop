@@ -26,40 +26,105 @@ fn get_optional_argument_from_type_arguments(segment: &syn::PathSegment) -> Opti
     }
 }
 
-fn get_option_arg_if_optional(
-    optional_segment: Option<&syn::PathSegment>,
-) -> (bool, Option<&syn::Type>) {
-    if let Some(segment) = optional_segment {
-        let is_option = segment.ident == "Option";
+fn get_field_builder_type<'a>(
+    optional_segment: Option<&'a syn::PathSegment>,
+    attrs: &'a Vec<syn::Attribute>,
+    ident: &'a syn::Ident,
+) -> FieldBuilderType<'a> {
+    let our_attrs = attrs.iter()
+        .filter_map(|attr| attr.parse_meta().ok() )
+        .find_map(|meta: syn::Meta| {
+            match meta {
+                syn::Meta::List(meta_list) => {
+                    if meta_list.path.is_ident("builder") {
+                        let f = meta_list.nested.first().unwrap();
+                        if let syn::NestedMeta::Meta(v) = f {
+                            if let syn::Meta::NameValue(name_value) = v {
+                                if name_value.path.is_ident("each") {
+                                    if let syn::Lit::Str(lit) = &name_value.lit {
+                                        Some(lit.value())
+                                    } else {
+                                        panic!("expected string literal");
+                                    }
+                                } else {
+                                    panic!("unrecognized attribute");
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        });
 
-        let argument_opt = if is_option {
-            get_optional_argument_from_type_arguments(segment)
-        } else {
-            None
-        };
-        (is_option, argument_opt)
+    if let Some(segment) = optional_segment {
+        match segment.ident.to_string().as_str() {
+            "Option" => {
+                let argument_opt = get_optional_argument_from_type_arguments(segment);
+                FieldBuilderType::Optional(argument_opt.unwrap())
+            },
+            "Vec" => {
+                let argument_opt = get_optional_argument_from_type_arguments(segment);
+                if let Some(each_func) = our_attrs {
+                    if ident != each_func.as_str() {
+                        FieldBuilderType::Vectoral(argument_opt.unwrap(), each_func)
+                    } else {
+                        FieldBuilderType::VectoralNoSetAll(argument_opt.unwrap(), each_func)
+                    }
+                } else {
+                    FieldBuilderType::Simple
+                }
+            }
+            _ => {
+                FieldBuilderType::Simple
+            }
+        }
     } else {
-        (false, None)
+        FieldBuilderType::Simple
     }
 }
 
 enum FieldBuilderType<'a> {
     Simple,
     Optional(&'a syn::Type),
+    Vectoral(&'a syn::Type, String),
+    VectoralNoSetAll(&'a syn::Type, String),
 }
 
-fn determine_field_type(ty: &syn::Type) -> FieldBuilderType {
+fn determine_field_type<'a>(ty: &'a syn::Type, attrs: &'a Vec<syn::Attribute>, field_ident: &'a syn::Ident) -> FieldBuilderType<'a> {
     if let syn::Type::Path(tpath) = ty {
         let mut iter = tpath.path.segments.iter();
         let must_be_option = iter.next();
         let must_be_none = iter.next();
 
-        let (start_with_option, argument) = get_option_arg_if_optional(must_be_option);
+        let res = get_field_builder_type(must_be_option, attrs, field_ident);
 
-        if start_with_option && must_be_none.is_none() {
-            FieldBuilderType::Optional(argument.unwrap())
-        } else {
-            FieldBuilderType::Simple
+        match res {
+            FieldBuilderType::Simple => FieldBuilderType::Simple,
+            FieldBuilderType::Optional(inner) => {
+                if must_be_none.is_some() {
+                    panic!("wrong type parameters for Option")
+                }
+                FieldBuilderType::Optional(inner)
+            }
+            FieldBuilderType::Vectoral(inner, each_func) => {
+                if must_be_none.is_some() {
+                    panic!("wrong type parameters for Vec")
+                }
+                FieldBuilderType::Vectoral(inner, each_func)
+            }
+            FieldBuilderType::VectoralNoSetAll(inner, each_func) => {
+                if must_be_none.is_some() {
+                    panic!("wrong type parameters for Vec")
+                }
+                FieldBuilderType::VectoralNoSetAll(inner, each_func)
+            }
         }
     } else {
         panic!("type wasn't path");
@@ -71,14 +136,19 @@ fn handle_field(
     builder: &mut BuilderBuilder,
 ) {
     let ty = &field.ty;
-    let field_builder_type = determine_field_type(ty);
-
+    let attrs = &field.attrs;
     let ident = field.ident.as_ref().unwrap();
+    let field_builder_type = determine_field_type(ty, attrs, ident);
+
     match field_builder_type {
         FieldBuilderType::Optional(inner) =>
             builder.add_optional(ident, inner),
         FieldBuilderType::Simple =>
             builder.add_simple(ident, ty),
+        FieldBuilderType::Vectoral(inner, each_func) =>
+            builder.add_vectoral(ident, inner, each_func),
+        FieldBuilderType::VectoralNoSetAll(inner, each_func) =>
+            builder.add_vectoral_no_set_all(ident, inner, each_func),
     }
 }
 
@@ -107,6 +177,47 @@ impl BuilderBuilder {
             target_construction,
             ident,
         }
+    }
+
+    fn add_vectoral(&mut self, ident: &syn::Ident, ty: &syn::Type, each: String) {
+        let each_ident = format_ident!("{}", each);
+        self.builder_inners.extend(quote! { #ident: Vec<#ty>, });
+
+        self.builder_methods.extend(quote! {
+            pub fn #ident(&mut self, #ident: Vec<#ty>) -> &mut Self {
+                self.#ident = #ident;
+                self
+            }
+
+            pub fn #each_ident(&mut self, #each_ident: #ty) -> &mut Self {
+                self.#ident.push(#each_ident);
+                self
+            }
+        });
+
+        self.target_construction.extend(quote! {
+            #ident: self.#ident.clone(),
+        });
+
+        self.add_constructor_inner_vec(ident);
+    }
+
+    fn add_vectoral_no_set_all(&mut self, ident: &syn::Ident, ty: &syn::Type, each: String) {
+        let each_ident = format_ident!("{}", each);
+        self.builder_inners.extend(quote! { #ident: Vec<#ty>, });
+
+        self.builder_methods.extend(quote! {
+            pub fn #each_ident(&mut self, #each_ident: #ty) -> &mut Self {
+                self.#ident.push(#each_ident);
+                self
+            }
+        });
+
+        self.target_construction.extend(quote! {
+            #ident: self.#ident.clone(),
+        });
+
+        self.add_constructor_inner_vec(ident);
     }
 
     fn add_simple(&mut self, ident: &syn::Ident, ty: &syn::Type) {
@@ -153,6 +264,10 @@ impl BuilderBuilder {
         self.builder_constructor_inners.extend(quote! { #ident: None, });
     }
 
+    fn add_constructor_inner_vec(&mut self, ident: &syn::Ident) {
+        self.builder_constructor_inners.extend(quote! { #ident: Vec::new(), });
+    }
+
     fn build(&self) -> TokenStream2 {
         let builder_inners = &self.builder_inners;
         let builder_constructor_inners = &self.builder_constructor_inners;
@@ -190,7 +305,7 @@ impl BuilderBuilder {
     }
 }
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let ast: syn::DeriveInput = syn::parse(input).unwrap();
 
