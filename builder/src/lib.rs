@@ -203,10 +203,10 @@ impl BuilderBuilder {
 
     fn add_vectoral(&mut self, ident: &syn::Ident, ty: &syn::Type, each: String) {
         let each_ident = format_ident!("{}", each);
-        self.builder_inners.extend(quote! { #ident: Vec<#ty>, });
+        self.builder_inners.extend(quote! { #ident: std::vec::Vec<#ty>, });
 
         self.builder_methods.extend(quote! {
-            pub fn #ident(&mut self, #ident: Vec<#ty>) -> &mut Self {
+            pub fn #ident(&mut self, #ident: std::vec::Vec<#ty>) -> &mut Self {
                 self.#ident = #ident;
                 self
             }
@@ -224,9 +224,9 @@ impl BuilderBuilder {
         self.add_constructor_inner_vec(ident);
     }
 
-    fn add_vectoral_no_set_all(&mut self, ident: &syn::Ident, ty: &syn::Type, each: String) {
+    fn add_vectoral_no_set_all(&mut self, ident: &syn::Ident, ty: &syn::Type, each: std::string::String) {
         let each_ident = format_ident!("{}", each);
-        self.builder_inners.extend(quote! { #ident: Vec<#ty>, });
+        self.builder_inners.extend(quote! { #ident: std::vec::Vec<#ty>, });
 
         self.builder_methods.extend(quote! {
             pub fn #each_ident(&mut self, #each_ident: #ty) -> &mut Self {
@@ -243,7 +243,7 @@ impl BuilderBuilder {
     }
 
     fn add_simple(&mut self, ident: &syn::Ident, ty: &syn::Type) {
-        self.builder_inners.extend(quote! { #ident: Option<#ty>, });
+        self.builder_inners.extend(quote! { #ident: std::option::Option<#ty>, });
 
         self.builder_methods.extend(quote! {
             pub fn #ident(&mut self, #ident: #ty) -> &mut Self {
@@ -266,7 +266,7 @@ impl BuilderBuilder {
     }
 
     fn add_optional(&mut self, ident: &syn::Ident, ty: &syn::Type) {
-        self.builder_inners.extend(quote! { #ident: Option<#ty>, });
+        self.builder_inners.extend(quote! { #ident: std::option::Option<#ty>, });
 
         self.builder_methods.extend(quote! {
             pub fn #ident(&mut self, #ident: #ty) -> &mut Self {
@@ -315,7 +315,7 @@ impl BuilderBuilder {
             impl #builder_ident {
                 #builder_methods
 
-                pub fn build(&mut self) -> Result<#ident, &'static str> {
+                pub fn build(&mut self) -> std::result::Result<#ident, &'static str> {
                     #builder_checks
 
                     Ok(Command {
